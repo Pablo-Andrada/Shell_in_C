@@ -1,0 +1,17 @@
+{
+    "configurations": [
+      {
+        "name": "WinLibs",
+        "compilerPath": "C:/winlibs/mingw64/bin/gcc.exe",
+        "includePath": [
+          "${workspaceFolder}/**",
+          "C:/winlibs/mingw64/include",
+          "C:/winlibs/mingw64/x86_64-w64-mingw32/include"
+        ],
+        "cStandard": "c17",
+        "intelliSenseMode": "gcc-x64"
+      }
+    ],
+    "version": 4
+  }
+  
