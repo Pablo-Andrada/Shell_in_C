@@ -7,7 +7,7 @@
       "command": "gcc",
       "args": [
         "-g",
-        "main.c",
+        "shell.c",
         "-o",
         "shell.exe"
       ],
