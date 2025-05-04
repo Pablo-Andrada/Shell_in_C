@@ -202,7 +202,7 @@ int main(void)
     do
     {
         printf("shell> "); // prompt
-        fflush(stdout);    // asegurar que se muestre
+        fflush(stdout);    // asegurar que se muestre correctamente
 
         line = read_line();
         tokens = split_line(line);
