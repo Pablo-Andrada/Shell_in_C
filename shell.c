@@ -1,197 +1,204 @@
-// shell.c
-// Un “mini shell” para Windows y Unix que soporta:
-//   - Comandos internos: exit, echo, cd
-//   - Comandos externos de Windows: mkdir, dir, copy, etc.
-//   - Comandos externos de Unix: ls, cat, grep, etc.
+/*
+shell.c - Mini shell multiplataforma (Windows/Unix)
+Soporta comandos internos y externos.
+*/
 
-#include <stdio.h>  // printf, perror, fgets
-#include <stdlib.h> // malloc, free, exit
-#include <string.h> // strtok, strcmp, strcspn
+// ==================== INCLUDES ====================
+#include <stdio.h>  // Funciones de entrada/salida: printf, perror, fgets
+#include <stdlib.h> // Gestión de memoria dinámica: malloc, free, exit
+#include <string.h> // Manipulación de strings: strtok, strcmp, strcspn
 
+// Inclusión de librerías específicas del sistema operativo
 #ifdef _WIN32
-#include <process.h> // _spawnvp, _P_WAIT
-#include <direct.h>  // _chdir
+#include <process.h> // _spawnvp (creación de procesos en Windows)
+#include <direct.h>  // _chdir (cambio de directorio en Windows)
 #else
-#include <unistd.h> // chdir, fork, execvp
-#include <sys/types.h>
-#include <sys/wait.h> // waitpid, WIFEXITED, WIFSIGNALED
+#include <unistd.h>    // chdir, fork, execvp (Unix)
+#include <sys/types.h> // Tipos de datos para procesos (Unix)
+#include <sys/wait.h>  // waitpid (espera de procesos en Unix)
 #endif
 
-/* ==================== read_line ====================
-   - Reserva 1024 bytes (máx) para leer del teclado.
-   - fgets() lee hasta ‘\n’ o EOF.
-   - Si llega EOF (Ctrl+Z/Enter en Windows, Ctrl+D en Unix):
-       imprime un salto de línea limpio y sale con éxito.
-   - Si hay error de lectura, llama a perror y sale con error.
+// ==================== read_line ====================
+/*
+Lee una línea de entrada desde el teclado.
+- Reserva 1024 bytes de memoria.
+- Maneja Ctrl+Z (Windows) o Ctrl+D (Unix) para salir.
+- Retorna: Puntero a la cadena leída (debe liberarse con free()).
 */
 char *read_line(void)
 {
     size_t bufsize = 1024;
     char *line = malloc(bufsize);
+
+    // Verificar asignación de memoria
     if (!line)
-    { // comprobar malloc
-        fprintf(stderr, "shell: allocation error\n");
+    {
+        fprintf(stderr, "shell: error de asignación de memoria\n");
         exit(EXIT_FAILURE);
     }
+
+    // Leer entrada con fgets
     if (fgets(line, bufsize, stdin) == NULL)
     {
         if (feof(stdin))
-        { // Ctrl+Z/Enter o Ctrl+D
+        { // Caso: EOF (usuario termina la entrada)
             printf("\n");
             exit(EXIT_SUCCESS);
         }
-        perror("fgets"); // otro fallo
+        perror("fgets"); // Error de lectura
         exit(EXIT_FAILURE);
     }
-    return line; // cliente libera con free()
+    return line;
 }
 
-/* ==================== split_line ====================
-   - Define delimitadores: espacio/tab/\r/\n.
-   - Reserva un array inicial de 64 punteros (tokens).
-   - strtok() recorre la línea y devuelve cada palabra.
-   - Si superamos ese array, hacemos realloc() para crecerlo.
-   - Terminamos el array poniendo tokens[pos] = NULL.
+// ==================== split_line ====================
+/*
+Divide la línea en tokens (palabras) usando delimitadores.
+- Delimitadores: espacios, tabs, retornos de carro y saltos de línea.
+- Retorna: Array de punteros a tokens terminado en NULL (debe liberarse con free()).
 */
-#define TOK_BUFSIZE 64
-#define TOK_DELIM " \t\r\n"
+#define TOK_BUFSIZE 64      // Tamaño inicial del array de tokens
+#define TOK_DELIM " \t\r\n" // Caracteres delimitadores
 
 char **split_line(char *line)
 {
-    int bufsize = TOK_BUFSIZE, pos = 0;
+    int bufsize = TOK_BUFSIZE;
+    int pos = 0;
     char **tokens = malloc(bufsize * sizeof(char *));
-    char *tok;
+
     if (!tokens)
     {
-        fprintf(stderr, "shell: allocation error\n");
+        fprintf(stderr, "shell: error de asignación de memoria\n");
         exit(EXIT_FAILURE);
     }
-    tok = strtok(line, TOK_DELIM);
-    while (tok)
+
+    // Primer token usando strtok
+    char *tok = strtok(line, TOK_DELIM);
+
+    while (tok != NULL)
     {
-        tokens[pos++] = tok; // guardar puntero al token
+        tokens[pos++] = tok;
+
+        // Redimensionar array si es necesario
         if (pos >= bufsize)
-        {                           // si llenamos el array
-            bufsize += TOK_BUFSIZE; // ampliarlo
+        {
+            bufsize += TOK_BUFSIZE;
             tokens = realloc(tokens, bufsize * sizeof(char *));
+
             if (!tokens)
             {
-                fprintf(stderr, "shell: allocation error\n");
+                fprintf(stderr, "shell: error de asignación de memoria\n");
                 exit(EXIT_FAILURE);
             }
         }
-        tok = strtok(NULL, TOK_DELIM); // siguiente token
+
+        tok = strtok(NULL, TOK_DELIM); // Siguiente token
     }
-    tokens[pos] = NULL; // marca final de lista
-    return tokens;      // cliente libera con free()
+
+    tokens[pos] = NULL; // Marca final del array
+    return tokens;
 }
 
-/* ==================== launch ====================
-   Ejecuta un comando dado:
-   1. Si es “exit” → devolver 0 (señal para salir).
-   2. Si es “echo” → imprimir manualmente tokens[1..].
-   3. Si es “cd”   → cambiar directorio con _chdir()/chdir().
-   4. Si no, ejecutar externamente:
-        - En Windows: construir ["cmd.exe","/C",args...,NULL]
-          y llamar a _spawnvp(_P_WAIT,...).
-        - En Unix: fork()/execvp()/waitpid().
-   Devuelve 1 para continuar el bucle en main().
+// ==================== launch ====================
+/*
+Ejecuta el comando recibido.
+- Maneja comandos internos: exit, echo, cd.
+- Ejecuta comandos externos según el sistema operativo.
+- Retorna: 1 para continuar ejecución, 0 para terminar.
 */
 int launch(char **args)
 {
     if (!args[0])
-        return 1; // línea vacía
+        return 1; // Línea vacía
 
-    // --- 1) exit interno ---
+    // ------ Comando: exit ------
     if (strcmp(args[0], "exit") == 0)
     {
-        return 0;
+        return 0; // Señal para terminar el shell
     }
-    // --- 2) echo interno ---
+
+    // ------ Comando: echo ------
     if (strcmp(args[0], "echo") == 0)
     {
         for (int i = 1; args[i]; i++)
         {
-            printf("%s", args[i]);
-            if (args[i + 1])
-                printf(" ");
+            printf("%s%s", args[i], args[i + 1] ? " " : "");
         }
         printf("\n");
         return 1;
     }
-    // --- 3) cd interno ---
+
+    // ------ Comando: cd ------
     if (strcmp(args[0], "cd") == 0)
     {
+        char *dir = args[1] ? args[1] : getenv("HOME");
+
 #ifdef _WIN32
-        if (_chdir(args[1] ? args[1] : "") != 0)
-            perror("shell");
+        if (_chdir(dir) != 0)
+        {
 #else
-        if (chdir(args[1] ? args[1] : "") != 0)
-            perror("shell");
+        if (chdir(dir) != 0)
+        {
 #endif
+            perror("shell");
+        }
         return 1;
     }
 
-    // --- 4) comando externo ---
+// ------ Comandos externos ------
 #ifdef _WIN32
-    // 4.a) contar tokens
-    int count = 0;
-    while (args[count])
-        count++;
-    // 4.b) preparar array ["cmd.exe","/C", arg0, arg1, ..., NULL]
-    char **cmd_args = malloc((count + 3) * sizeof(char *));
-    if (!cmd_args)
-    {
-        fprintf(stderr, "shell: allocation error\n");
-        return 1;
-    }
+    // Windows: Usar cmd.exe con /C para ejecutar comandos
+    int arg_count = 0;
+    while (args[arg_count])
+        arg_count++;
+
+    // Crear array: ["cmd.exe", "/C", comando..., NULL]
+    char **cmd_args = malloc((arg_count + 3) * sizeof(char *));
     cmd_args[0] = "cmd.exe";
     cmd_args[1] = "/C";
-    for (int i = 0; i <= count; i++)
+
+    for (int i = 0; i <= arg_count; i++)
     {
-        cmd_args[i + 2] = args[i]; // incluye el NULL final
+        cmd_args[i + 2] = args[i];
     }
-    // 4.c) lanzar y esperar
+
+    // Ejecutar y esperar
     if (_spawnvp(_P_WAIT, "cmd.exe", (const char *const *)cmd_args) == -1)
     {
         perror("shell");
     }
     free(cmd_args);
+
 #else
-    // 4.a) fork
+    // Unix: Crear proceso hijo
     pid_t pid = fork();
+
     if (pid < 0)
-    {
+    { // Error en fork
         perror("shell");
     }
     else if (pid == 0)
-    {
-        // 4.b) hijo → execvp
+    { // Proceso hijo
         if (execvp(args[0], args) == -1)
+        {
             perror("shell");
-        exit(EXIT_FAILURE);
+            exit(EXIT_FAILURE);
+        }
     }
     else
-    {
-        // 4.c) padre → esperar hijo
+    { // Proceso padre
         int status;
-        do
-        {
-            waitpid(pid, &status, WUNTRACED);
-        } while (!WIFEXITED(status) && !WIFSIGNALED(status));
+        waitpid(pid, &status, WUNTRACED); // Esperar al hijo
     }
 #endif
 
-    return 1; // seguimos en el bucle
+    return 1; // Continuar ejecución
 }
 
-/* ==================== main ====================
-   1. Bucle do-while que llama a:
-      - read_line()
-      - split_line()
-      - launch()
-   2. Libera memoria (tokens y línea).
-   3. Repite mientras launch devuelva 1.
+// ==================== main ====================
+/*
+Función principal del shell.
+- Bucle infinito: prompt → leer → dividir → ejecutar → liberar memoria.
 */
 int main(void)
 {
@@ -201,16 +208,18 @@ int main(void)
 
     do
     {
-        printf("shell> "); // prompt
-        fflush(stdout);    // asegurar que se muestre correctamente
+        printf("shell> "); // Mostrar prompt
+        fflush(stdout);    // Asegurar que se imprime
 
-        line = read_line();
-        tokens = split_line(line);
-        status = launch(tokens);
+        line = read_line();        // Leer línea
+        tokens = split_line(line); // Dividir en tokens
+        status = launch(tokens);   // Ejecutar comando
 
-        free(tokens); // liberar array de punteros
-        free(line);   // liberar buffer de lectura
-    } while (status);
+        // Liberar memoria
+        free(tokens);
+        free(line);
+
+    } while (status); // Continuar hasta recibir 'exit'
 
     return EXIT_SUCCESS;
 }
